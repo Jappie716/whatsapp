@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mini WhatsApp Chat</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="chat-app">
+  <div class="sidebar">
+    <h2>Welkom, <span id="current-user"></span></h2>
+    <h3>Contacts</h3>
+    <ul id="contacts-list"></ul>
+    <input type="text" id="new-contact" placeholder="Voeg contact toe">
+    <button onclick="addContact()">Toevoegen</button>
+    <h3>Groepen</h3>
+    <ul id="groups-list"></ul>
+    <input type="text" id="new-group" placeholder="Nieuwe groep naam">
+    <button onclick="createGroup()">Maak groep</button>
+  </div>
+
+  <div class="chat-window">
+    <h3 id="chat-title">Selecteer een contact of groep</h3>
+    <div id="messages"></div>
+    <div class="send-msg">
+      <input type="text" id="message-input" placeholder="Typ een bericht...">
+      <button onclick="sendMessage()">Verstuur</button>
+    </div>
+  </div>
+</div>
+
+<script src="script.js"></script>
+</body>
+</html>
