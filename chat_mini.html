@@ -1,0 +1,310 @@
+<!--
+Minimal WhatsApp-like chat (frontend + simple server) - NOT SECURE
+Files included below in one document for convenience:
+  - chat-mini.html   (this file: frontend)
+  - server.js        (simple Node/Express backend using data.json)
+
+How to use:
+  1) Option A - Local test with Node (recommended for testing):
+     - Create two files in a folder: chat-mini.html and server.js (copy from below).
+     - Create an empty data.json: {}
+     - Run: npm init -y && npm install express body-parser cors
+     - Start: node server.js
+     - Open chat-mini.html in browser (or use a simple static server). The frontend talks to http://localhost:3000.
+
+  2) Option B - Replit / Glitch / Deta:
+     - Create a Node project and paste server.js. Put chat-mini.html in /public and serve static files.
+     - Replit already serves ports; check the URL and update FRONTEND_API_BASE in chat-mini.html if needed.
+
+Storage & security:
+  - This example stores everything in a flat JSON file (data.json). It's trivial to break.
+  - Do NOT use this for anything real or sensitive. No password hashing, no rate limits, no auth tokens.
+
+Now the files.
+-->
+
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Chat Mini (niet veilig, wel leuk)</title>
+  <style>
+    :root{--accent:#2b7cff}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;margin:0;background:#f2f4f7;color:#111}
+    .app{display:flex;height:100vh}
+    .sidebar{width:320px;background:#fff;border-right:1px solid #e4e7eb;padding:12px;box-sizing:border-box;overflow:auto}
+    .main{flex:1;display:flex;flex-direction:column}
+    header{padding:12px;border-bottom:1px solid #e8edf3;background:linear-gradient(180deg,#fff,#fbfdff)}
+    .search input{width:100%;padding:8px;border:1px solid #d8dde6;border-radius:8px}
+    .user-list{margin-top:12px}
+    .user{padding:10px;border-radius:8px;cursor:pointer;border:1px solid transparent}
+    .user:hover{background:#f6f8fb}
+    .selected{background:#eef6ff;border-color:rgba(43,124,255,0.12)}
+
+    .chat-header{padding:12px;border-bottom:1px solid #e8edf3}
+    .messages{flex:1;padding:16px;overflow:auto;background:linear-gradient(180deg,#f7f9fc,#eef3fa)}
+    .msg{max-width:60%;padding:8px 12px;margin-bottom:8px;border-radius:12px}
+    .me{background:#2b7cff;color:#fff;margin-left:auto}
+    .them{background:#fff;border:1px solid #e6eefb}
+    .composer{display:flex;padding:12px;border-top:1px solid #e8edf3}
+    .composer input{flex:1;padding:10px;border-radius:8px;border:1px solid #d8dde6}
+    .btn{background:var(--accent);color:#fff;padding:8px 12px;border-radius:8px;border:none;margin-left:8px;cursor:pointer}
+    .tiny{font-size:12px;color:#666}
+    .group-badge{display:inline-block;background:#eaf2ff;padding:2px 8px;border-radius:999px;margin-left:8px;font-size:12px}
+    .controls{display:flex;gap:8px;margin-top:8px}
+    .small{padding:6px 8px;font-size:13px}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="sidebar">
+      <header>
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <strong>Chat Mini</strong>
+          <button id="btn-localmode" class="small">Local mode</button>
+        </div>
+        <div class="tiny">Geen beveiliging. Gebruik alleen om te testen.</div>
+      </header>
+
+      <div style="margin-top:12px">
+        <div id="auth-area"></div>
+      </div>
+
+      <div style="margin-top:12px">
+        <div class="search"><input id="searchUsers" placeholder="Zoek gebruikers (naam)" /></div>
+        <div class="controls">
+          <button id="btn-newGroup" class="small">Nieuwe groep</button>
+          <button id="btn-refresh" class="small">Ververs</button>
+        </div>
+        <div class="user-list" id="userList"></div>
+      </div>
+    </div>
+
+    <div class="main">
+      <div class="chat-header" id="chatHeader"><em>Kies een gesprek uit links</em></div>
+      <div class="messages" id="messages"></div>
+      <div class="composer">
+        <input id="messageInput" placeholder="Typ een bericht..." />
+        <button id="sendBtn" class="btn">Stuur</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // === CONFIG ===
+    // Change this if your backend runs elsewhere. If blank, frontend will use localStorage only.
+    const FRONTEND_API_BASE = ''; // e.g. 'https://your-replit-url' or 'http://localhost:3000'
+
+    // If no backend configured, frontend will stay in "local mode" and keep data in localStorage
+    let localMode = !FRONTEND_API_BASE;
+
+    // === Simple client state ===
+    let me = null;
+    let users = [];
+    let conversations = {}; // { convoId: { id, title, members:[], messages: [{from,text,ts}] }}
+    let currentConvo = null;
+
+    // DOM refs
+    const authArea = document.getElementById('auth-area');
+    const userListEl = document.getElementById('userList');
+    const searchInput = document.getElementById('searchUsers');
+    const chatHeader = document.getElementById('chatHeader');
+    const messagesEl = document.getElementById('messages');
+    const messageInput = document.getElementById('messageInput');
+    const sendBtn = document.getElementById('sendBtn');
+    const btnLocalMode = document.getElementById('btn-localmode');
+    const btnNewGroup = document.getElementById('btn-newGroup');
+    const btnRefresh = document.getElementById('btn-refresh');
+
+    // === Utilities ===
+    const api = (path, opts = {}) => {
+      if (localMode) return Promise.reject(new Error('local'));
+      const url = (FRONTEND_API_BASE||'') + '/api' + path;
+      opts.headers = opts.headers || {};
+      opts.headers['Content-Type'] = 'application/json';
+      return fetch(url, opts).then(r => r.json());
+    };
+
+    const uid = () => 'u_' + Math.random().toString(36).slice(2,9);
+    const now = () => Date.now();
+
+    // === Persistence (localStorage fallback) ===
+    function saveLocal() { localStorage.setItem('chat_mini_data', JSON.stringify({me,users,conversations})); }
+    function loadLocal() { try{ const d = JSON.parse(localStorage.getItem('chat_mini_data')||'{}'); if(d.users) users = d.users; if(d.conversations) conversations = d.conversations; if(d.me) me = d.me; }catch(e){} }
+
+    // === Auth UI ===
+    function renderAuth(){
+      if(me){
+        authArea.innerHTML = `
+          <div>Ingelogd als <strong>${escapeHtml(me.name)}</strong> <span class="tiny">(${me.id})</span></div>
+          <div class="tiny" style="margin-top:6px">Klik op een gebruiker om te chatten. Of maak een groep.</div>
+          <div style="margin-top:8px"><button id="btn-logout" class="small">Logout</button></div>
+        `;
+        document.getElementById('btn-logout').onclick = ()=>{ me=null; saveLocal(); renderAuth(); renderUserList(); };
+      } else {
+        authArea.innerHTML = `
+          <div style="display:flex;gap:8px">
+            <input id="regName" placeholder="Naam" />
+            <button id="btn-register" class="small">Maak account</button>
+          </div>
+          <div class="tiny" style="margin-top:6px">Of gebruik bestaand account id:</div>
+          <div style="display:flex;gap:8px;margin-top:6px">
+            <input id="loginId" placeholder="Gebruiker id" />
+            <button id="btn-login" class="small">Login</button>
+          </div>
+        `;
+        document.getElementById('btn-register').onclick = async ()=>{
+          const name = document.getElementById('regName').value.trim(); if(!name) return alert('geef een naam');
+          const newUser = { id: uid(), name };
+          users.push(newUser);
+          me = newUser;
+          saveLocal(); renderAuth(); renderUserList();
+        };
+        document.getElementById('btn-login').onclick = ()=>{
+          const id = document.getElementById('loginId').value.trim(); if(!id) return alert('voer id in');
+          const u = users.find(x=>x.id===id);
+          if(!u) return alert('gebruiker niet gevonden');
+          me = u; saveLocal(); renderAuth(); renderUserList();
+        };
+      }
+    }
+
+    // === Users list ===
+    function renderUserList(){
+      const q = searchInput.value.trim().toLowerCase();
+      userListEl.innerHTML = '';
+      const list = users.filter(u=>!q||u.name.toLowerCase().includes(q)||u.id.includes(q));
+      if(list.length===0) userListEl.innerHTML = '<div class="tiny">Geen gebruikers. Maak er een aan.</div>';
+      list.forEach(u=>{
+        const el = document.createElement('div'); el.className='user';
+        el.innerHTML = `<strong>${escapeHtml(u.name)}</strong><div class="tiny">${u.id}</div>`;
+        el.onclick = ()=> openOrCreateConvoWith(u);
+        if(currentConvo && currentConvo.members && currentConvo.members.includes(u.id)) el.classList.add('selected');
+        userListEl.appendChild(el);
+      });
+    }
+
+    function openOrCreateConvoWith(user){
+      if(!me){ alert('log in eerst'); return; }
+      // find 1-on-1 convo
+      let convo = Object.values(conversations).find(c=> c.members.length===2 && c.members.includes(me.id) && c.members.includes(user.id));
+      if(!convo){ convo = { id: 'c_'+Math.random().toString(36).slice(2,9), title: user.name, members:[me.id,user.id], isGroup:false, messages:[] }; conversations[convo.id]=convo; saveLocal(); }
+      currentConvo = convo; renderChat(); renderUserList();
+    }
+
+    // === Chat UI ===
+    function renderChat(){
+      if(!currentConvo){ chatHeader.innerHTML = '<em>Kies een gesprek</em>'; messagesEl.innerHTML=''; return; }
+      const title = currentConvo.isGroup ? currentConvo.title + `<span class="group-badge">Groep</span>` : currentConvo.title;
+      chatHeader.innerHTML = `<div><strong>${escapeHtml(title)}</strong><div class="tiny">${currentConvo.members.length} leden</div></div>`;
+      messagesEl.innerHTML = '';
+      (currentConvo.messages||[]).forEach(m=>{
+        const div = document.createElement('div'); div.className='msg ' + (m.from===me.id? 'me':'them');
+        const who = users.find(u=>u.id===m.from); const name = who?who.name:m.from;
+        div.innerHTML = `<div style="font-size:12px;margin-bottom:6px;color:rgba(0,0,0,0.6)">${escapeHtml(name)}</div><div>${escapeHtml(m.text)}</div><div class="tiny" style="margin-top:6px">${new Date(m.ts).toLocaleString()}</div>`;
+        messagesEl.appendChild(div);
+      });
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    sendBtn.onclick = ()=>{ sendMessage(); };
+    messageInput.onkeydown = (e)=>{ if(e.key==='Enter') sendMessage(); };
+
+    function sendMessage(){
+      if(!me) return alert('log in eerst');
+      if(!currentConvo) return alert('open een gesprek');
+      const text = messageInput.value.trim(); if(!text) return;
+      const msg = { from: me.id, text, ts: now() };
+      currentConvo.messages.push(msg);
+      saveLocal(); renderChat(); messageInput.value='';
+      // attempt to push to backend if present
+      if(!localMode){ api(`/convos/${currentConvo.id}/messages`, { method:'POST', body: JSON.stringify(msg) }).catch(()=>{}); }
+    }
+
+    // === Group creation ===
+    btnNewGroup.onclick = ()=>{
+      if(!me) return alert('log in eerst');
+      const name = prompt('Naam van de groep?'); if(!name) return;
+      const members = prompt('Voeg leden ids toe, gescheiden door komma (of laat leeg)');
+      const arr = members ? members.split(',').map(x=>x.trim()).filter(Boolean) : [];
+      const group = { id:'g_'+Math.random().toString(36).slice(2,9), title:name, members: [me.id, ...arr], isGroup:true, messages:[] };
+      conversations[group.id]=group; saveLocal(); currentConvo=group; renderChat(); renderUserList();
+    };
+
+    btnRefresh.onclick = ()=>{ loadFromBackendOrLocal(); };
+
+    searchInput.oninput = ()=> renderUserList();
+
+    btnLocalMode.onclick = ()=>{ localMode = !localMode; btnLocalMode.textContent = localMode ? 'Local mode' : 'API mode'; alert('Local mode: '+localMode); }
+
+    function loadFromBackendOrLocal(){
+      if(localMode){ loadLocal(); renderAuth(); renderUserList(); renderChat(); return; }
+      // attempt to get users + convos
+      api('/users').then(d=>{ if(d.users) users = d.users; if(d.conversations) conversations = d.conversations; saveLocal(); renderAuth(); renderUserList(); renderChat(); }).catch(e=>{ alert('Backend niet bereikbaar, schakelen naar local mode'); localMode = true; loadFromBackendOrLocal(); });
+    }
+
+    // bootstrap
+    loadLocal(); renderAuth(); renderUserList(); renderChat();
+
+    // small helper
+    function escapeHtml(s){ return String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'); }
+
+    // Auto-save periodically
+    setInterval(saveLocal, 5000);
+  </script>
+
+
+<!--
+server.js (sample simple express backend — NOT SECURE). Save this as server.js and run with `node server.js`.
+It stores everything in data.json and exposes simple endpoints the frontend above expects.
+-->
+
+<pre>
+<code>
+// ----- server.js -----
+const express = require('express');
+const bodyParser = require('body-parser');
+const fs = require('fs');
+const cors = require('cors');
+
+const DATA_FILE = './data.json';
+function load(){ try{ return JSON.parse(fs.readFileSync(DATA_FILE,'utf8')||'{}'); }catch(e){ return {}; } }
+function save(d){ fs.writeFileSync(DATA_FILE, JSON.stringify(d, null, 2)); }
+
+const app = express();
+app.use(cors());
+app.use(bodyParser.json());
+
+// serve static frontend if you put chat-mini.html in /public
+app.use(express.static('public'));
+
+app.get('/api/users', (req,res)=>{
+  const d = load();
+  res.json({ users: d.users || [], conversations: d.conversations || {} });
+});
+
+app.post('/api/users', (req,res)=>{
+  const d = load(); d.users = d.users || [];
+  const user = { id: req.body.id || ('u_'+Math.random().toString(36).slice(2,9)), name: req.body.name };
+  d.users.push(user); save(d); res.json(user);
+});
+
+app.get('/api/convos/:id', (req,res)=>{
+  const d = load(); res.json(d.conversations && d.conversations[req.params.id] ? d.conversations[req.params.id] : {});
+});
+
+app.post('/api/convos/:id/messages', (req,res)=>{
+  const d = load(); d.conversations = d.conversations || {};
+  const id = req.params.id; d.conversations[id] = d.conversations[id] || { id, messages: [], members: [] };
+  d.conversations[id].messages.push(req.body);
+  save(d); res.json({ok:true});
+});
+
+app.listen(3000, ()=> console.log('Server gestart op :3000'));
+// ----- einde server.js -----
+</code>
+</pre>
+
+</body>
+</html>
